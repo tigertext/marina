@@ -13,6 +13,6 @@
        {ref,"709445d213514ab1121fb67329dca945ffb11599"}},
   0},
  {<<"shackle">>,
-  {git,"https://github.com/lpgauth/shackle.git",
-       {ref,"1cf730d86b918df5d390dcfce7f33f49de8e2084"}},
+  {git,"https://github.com/tigertext/shackle.git",
+       {ref,"2f260ce11ae271774dbfef9818d4c11e07d37101"}},
   0}].
