@@ -13,6 +13,10 @@
     start/2,
     stop/1
 ]).
+-export([
+    node_up/2,
+    node_down/2
+]).
 
 %% public
 -spec init() ->
@@ -77,31 +81,42 @@ stop(N) ->
     stop(N - 1).
 
 node_down(PoolName, _FailedWorkerCount) ->
-    shackle_utils:warning_msg(?MODULE, "node down!!! node down!!!", [PoolName]),
+    shackle_utils:warning_msg(?MODULE, "node down!!! node down!!! ~p", [PoolName]),
     ets:insert(?MODULE, {PoolName, true}).
-node_up(PoolName, _FailedWorkerCount) ->
-    shackle_utils:warning_msg(?MODULE, "node up!!! node up!!!", [PoolName]),
-    ets:delete_object(?MODULE, PoolName).
+node_up(PoolName, FailedWorkerCount) ->
+    shackle_utils:warning_msg(?MODULE, "node up!!! node up!!! ~p ~p", [PoolName, FailedWorkerCount]),
+    ets:delete(?MODULE, PoolName).
 
 %% private
-node({random, NodeCount} = Strategy, undefined) ->
-    N = shackle_utils:random(NodeCount),
-    check_node(foil:lookup(?MODULE, {node, N}), Strategy, undefined);
-node({token_aware, NodeCount} = Strategy, undefined) ->
-    N = shackle_utils:random(NodeCount),
-    check_node(foil:lookup(?MODULE, {node, N}), Strategy, undefined);
-node({token_aware, _NodeCount} = Strategy, RoutingKey) ->
-    check_node(marina_ring:lookup(RoutingKey), Strategy, RoutingKey).
+node(Strategy, RoutingKey) ->
+    node(Strategy, RoutingKey, 1).
 
-check_node({error, _}, Strategy, RoutingKey) ->
-    node(Strategy, RoutingKey);
-check_node(Node, Strategy, RoutingKey) ->
+node({_, NodeCount} , undefined, N) when N >= NodeCount ->
+    %% too many failures, pick first.
+    foil:lookup(?MODULE, {node, 1});
+node({random, NodeCount} = Strategy, undefined, N) ->
+    X = shackle_utils:random(NodeCount),
+    check_node(foil:lookup(?MODULE, {node, X}), Strategy, undefined, N);
+node({token_aware, NodeCount} = Strategy, undefined, N) ->
+    X = shackle_utils:random(NodeCount),
+    check_node(foil:lookup(?MODULE, {node, X}), Strategy, undefined, N);
+node({token_aware, _NodeCount} = Strategy, RoutingKey, N) ->
+    check_node(marina_ring:lookup(RoutingKey), Strategy, RoutingKey, N).
+
+check_node({error, _}, Strategy, _RoutingKey, N) ->
+    %% cannot find a proper node when routing,
+    %% remove the routing key, so the node selection will fall back to
+    %% random or roken_aware without routing key.
+    node(Strategy, undefined, N+1);
+check_node({ok, Node}, Strategy, _RoutingKey, N) ->
     case is_node_down(Node) of
         true ->
             shackle_utils:warning_msg(?MODULE, "get a dead node when finding node, node id ~p, retrying", [Node]),
-            node(Strategy, RoutingKey);
+            %% the selected node is marked as down.
+            %% remove routing key to fallback to random or token_aware without routing key.
+            node(Strategy, undefined, N+1);
         false ->
-            Node
+            {ok, Node}
     end.
 
 start(<<A, B, C, D>> = RpcAddress) ->
@@ -119,8 +134,6 @@ start(<<A, B, C, D>> = RpcAddress) ->
     SocketOptions = ?GET_ENV(socket_options, ?DEFAULT_SOCKET_OPTIONS),
     PoolFailureThresholdPercentage = ?GET_ENV(pool_failure_threshold_percentage, 0),
     PoolRecoverThresholdPercentage = ?GET_ENV(pool_recover_threshold_percentage, 0),
-    FailureCbFun = undefined,
-    RecoverCbFun = undefined,
     ClientOptions = [
         {ip, Ip},
         {port, Port},
@@ -135,8 +148,8 @@ start(<<A, B, C, D>> = RpcAddress) ->
         {pool_strategy, PoolStrategy},
         {pool_failure_threshold_percentage, PoolFailureThresholdPercentage},
         {pool_recover_threshold_percentage, PoolRecoverThresholdPercentage},
-        {pool_failure_callback_fn, FailureCbFun},
-        {pool_recover_callback_fn, RecoverCbFun}
+        {pool_failure_callback_module, ?MODULE},
+        {pool_recover_callback_module, ?MODULE}
     ],
 
     case shackle_pool:start(NodeId, ?CLIENT, ClientOptions, PoolOptions) of
@@ -156,6 +169,8 @@ start([{RpcAddress, _Tokens} | T], Strategy, N) ->
     case start(RpcAddress) of
         {ok, NodeId} ->
             foil:insert(?MODULE, {node, N}, NodeId),
+            start(T, Strategy, N + 1);
+        {error, pool_already_started} ->
             start(T, Strategy, N + 1);
         {error, _Reason} ->
             start(T, Strategy, N)

@@ -64,18 +64,18 @@ handle_msg(?MSG_BOOTSTRAP, #state {
     case nodes(BootstrapIps, Port) of
         {ok, Nodes} ->
             marina_pool:start(Strategy, Nodes),
+            timer:send_after(1000, self(), ?MSG_PEER_WATCHER),
             {ok, State#state {
                 node_count = length(Nodes),
                 nodes = Nodes
-            }},
-            timer:send_after(1000, ?MSG_PEER_WATCHER);
+            }};
         {error, _Reason} ->
             shackle_utils:warning_msg(?MODULE, "bootstrap failed~n", []),
             {ok, State#state {
                 timer_ref = erlang:send_after(500, self(), ?MSG_BOOTSTRAP)
             }}
     end;
-handle_msg(?MSG_BOOTSTRAP, #state {
+handle_msg(?MSG_PEER_WATCHER, #state {
         bootstrap_ips = BootstrapIps,
         port = Port,
         strategy = Strategy,
@@ -84,17 +84,23 @@ handle_msg(?MSG_BOOTSTRAP, #state {
     case nodes(BootstrapIps, Port) of
         {ok, Nodes} ->
             NodesToStart = Nodes -- OldNodes,
-            shackle_utils:warning_msg(?MODULE, "found new nodes, starting ~p", [NodesToStart]),
-            marina_pool:start(Strategy, NodesToStart),
+            case NodesToStart of
+                [] ->
+                    pass;
+                _ ->
+                    shackle_utils:warning_msg(?MODULE, "found new nodes, starting ~p", [NodesToStart]),
+                    marina_pool:start(Strategy, Nodes)
+            end,
+            timer:send_after(?PEER_WATCH_INTERVAL, self(), ?MSG_PEER_WATCHER),
             {ok, State#state{
                 node_count = length(Nodes),
                 nodes = Nodes
-            }},
-            timer:send_after(self(), ?MSG_PEER_WATCHER);
+            }};
+
         {error, Reason} ->
             shackle_utils:warning_msg(?MODULE, "failed to refresh cassandra peers ~p~n", [Reason]),
             {ok, State#state{
-                timer_ref = erlang:send_after(500, self(), ?MSG_BOOTSTRAP)
+                timer_ref = erlang:send_after(500, self(), ?MSG_PEER_WATCHER)
             }}
     end.
 
