@@ -13,11 +13,14 @@
 ]).
 
 -define(MSG_BOOTSTRAP, bootstrap_pool).
+-define(MSG_PEER_WATCHER, peer_watch).
+-define(PEER_WATCH_INTERVAL, 60000).
 
 -record(state, {
     bootstrap_ips :: list(),
     datacenter    :: undefined | binary(),
     node_count    :: undefined | pos_integer(),
+    nodes         :: list(),
     port          :: pos_integer(),
     strategy      :: random | token_aware,
     timer_ref     :: undefined | reference()
@@ -62,14 +65,39 @@ handle_msg(?MSG_BOOTSTRAP, #state {
         {ok, Nodes} ->
             marina_pool:start(Strategy, Nodes),
             {ok, State#state {
-                node_count = length(Nodes)
-            }};
+                node_count = length(Nodes),
+                nodes = Nodes
+            }},
+            timer:send_after(1000, ?MSG_PEER_WATCHER);
         {error, _Reason} ->
             shackle_utils:warning_msg(?MODULE, "bootstrap failed~n", []),
             {ok, State#state {
                 timer_ref = erlang:send_after(500, self(), ?MSG_BOOTSTRAP)
             }}
+    end;
+handle_msg(?MSG_BOOTSTRAP, #state {
+        bootstrap_ips = BootstrapIps,
+        port = Port,
+        strategy = Strategy,
+        nodes = OldNodes
+    } = State) ->
+    case nodes(BootstrapIps, Port) of
+        {ok, Nodes} ->
+            NodesToStart = Nodes -- OldNodes,
+            shackle_utils:warning_msg(?MODULE, "found new nodes, starting ~p", [NodesToStart]),
+            marina_pool:start(Strategy, NodesToStart),
+            {ok, State#state{
+                node_count = length(Nodes),
+                nodes = Nodes
+            }},
+            timer:send_after(self(), ?MSG_PEER_WATCHER);
+        {error, Reason} ->
+            shackle_utils:warning_msg(?MODULE, "failed to refresh cassandra peers ~p~n", [Reason]),
+            {ok, State#state{
+                timer_ref = erlang:send_after(500, self(), ?MSG_BOOTSTRAP)
+            }}
     end.
+
 
 -spec terminate(term(), state()) ->
     ok.

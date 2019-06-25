@@ -19,6 +19,7 @@
     ok.
 
 init() ->
+    ets:new(?MODULE, [named_table, public, set]),
     foil:new(?MODULE),
     foil:load(?MODULE).
 
@@ -75,15 +76,33 @@ stop(N) ->
     ok = foil:delete(?MODULE, {node, N}),
     stop(N - 1).
 
+node_down(PoolName, _FailedWorkerCount) ->
+    shackle_utils:warning_msg(?MODULE, "node down!!! node down!!!", [PoolName]),
+    ets:insert(?MODULE, {PoolName, true}).
+node_up(PoolName, _FailedWorkerCount) ->
+    shackle_utils:warning_msg(?MODULE, "node up!!! node up!!!", [PoolName]),
+    ets:delete_object(?MODULE, PoolName).
+
 %% private
-node({random, NodeCount}, undefined) ->
+node({random, NodeCount} = Strategy, undefined) ->
     N = shackle_utils:random(NodeCount),
-    foil:lookup(?MODULE, {node, N});
-node({token_aware, NodeCount}, undefined) ->
+    check_node(foil:lookup(?MODULE, {node, N}), Strategy, undefined);
+node({token_aware, NodeCount} = Strategy, undefined) ->
     N = shackle_utils:random(NodeCount),
-    foil:lookup(?MODULE, {node, N});
-node({token_aware, _NodeCount}, RoutingKey) ->
-    marina_ring:lookup(RoutingKey).
+    check_node(foil:lookup(?MODULE, {node, N}), Strategy, undefined);
+node({token_aware, _NodeCount} = Strategy, RoutingKey) ->
+    check_node(marina_ring:lookup(RoutingKey), Strategy, RoutingKey).
+
+check_node({error, _}, Strategy, RoutingKey) ->
+    node(Strategy, RoutingKey);
+check_node(Node, Strategy, RoutingKey) ->
+    case is_node_down(Node) of
+        true ->
+            shackle_utils:warning_msg(?MODULE, "get a dead node when finding node, node id ~p, retrying", [Node]),
+            node(Strategy, RoutingKey);
+        false ->
+            Node
+    end.
 
 start(<<A, B, C, D>> = RpcAddress) ->
     BacklogSize = ?GET_ENV(backlog_size, ?DEFAULT_BACKLOG_SIZE),
@@ -98,7 +117,10 @@ start(<<A, B, C, D>> = RpcAddress) ->
     ReconnectTimeMin = ?GET_ENV(reconnect_time_min,
         ?DEFAULT_RECONNECT_MIN),
     SocketOptions = ?GET_ENV(socket_options, ?DEFAULT_SOCKET_OPTIONS),
-
+    PoolFailureThresholdPercentage = ?GET_ENV(pool_failure_threshold_percentage, 0),
+    PoolRecoverThresholdPercentage = ?GET_ENV(pool_recover_threshold_percentage, 0),
+    FailureCbFun = undefined,
+    RecoverCbFun = undefined,
     ClientOptions = [
         {ip, Ip},
         {port, Port},
@@ -110,7 +132,11 @@ start(<<A, B, C, D>> = RpcAddress) ->
     PoolOptions = [
         {backlog_size, BacklogSize},
         {pool_size, PoolSize},
-        {pool_strategy, PoolStrategy}
+        {pool_strategy, PoolStrategy},
+        {pool_failure_threshold_percentage, PoolFailureThresholdPercentage},
+        {pool_recover_threshold_percentage, PoolRecoverThresholdPercentage},
+        {pool_failure_callback_fn, FailureCbFun},
+        {pool_recover_callback_fn, RecoverCbFun}
     ],
 
     case shackle_pool:start(NodeId, ?CLIENT, ClientOptions, PoolOptions) of
@@ -134,3 +160,6 @@ start([{RpcAddress, _Tokens} | T], Strategy, N) ->
         {error, _Reason} ->
             start(T, Strategy, N)
     end.
+
+is_node_down(NodeName) ->
+    ets:lookup(?MODULE, NodeName) /= [].
