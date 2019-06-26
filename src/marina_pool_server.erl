@@ -84,13 +84,9 @@ handle_msg(?MSG_PEER_WATCHER, #state {
     case nodes(BootstrapIps, Port) of
         {ok, Nodes} ->
             NodesToStart = Nodes -- OldNodes,
-            case NodesToStart of
-                [] ->
-                    pass;
-                _ ->
-                    shackle_utils:warning_msg(?MODULE, "found new nodes, starting ~p", [NodesToStart]),
-                    marina_pool:start(Strategy, Nodes)
-            end,
+            NodesToStop = OldNodes -- Nodes,
+            stop_nodes(NodesToStop, Strategy, Nodes),
+            start_nodes(Strategy, NodesToStart, OldNodes),
             timer:send_after(?PEER_WATCH_INTERVAL, self(), ?MSG_PEER_WATCHER),
             {ok, State#state{
                 node_count = length(Nodes),
@@ -174,3 +170,22 @@ peers_query(Socket) ->
     [[_RpcAddress, Datacenter, _Tokens]] = Rows,
     {ok, {result, _ , _, Rows2}} = marina_utils:query(Socket, ?PEERS_QUERY),
     {ok, Rows ++ Rows2, Datacenter}.
+
+%% start new nodes found in cassandra cluster.
+start_nodes(_Strategy, [], _OldNodes) ->
+    ok;
+%% the reason why to start all nodes instead of nodestostart is
+%% because marina_ring needs all nodes to build the ring.
+%% for started nodes, it will not be started again.
+start_nodes(Strategy, NodesToStart, OldNodes) ->
+    shackle_utils:warning_msg(?MODULE, "found new nodes, starting ~p", [NodesToStart]),
+    %% make sure the new nodes are in the end of the list
+    %% so foil will not overwrite random settings
+    marina_pool:start(Strategy, OldNodes ++ NodesToStart).
+
+%% stop nodes removed from cassandra cluster.
+stop_nodes([], _Strategy, _Nodes) ->
+    ok;
+stop_nodes(NodesToStop, Strategy, Nodes) ->
+    shackle_utils:warning_msg(?MODULE, "nodes get removed from cluster, stopping worker pool ~p", [NodesToStop]),
+    marina_pool:stop_nodes(NodesToStop, Strategy, Nodes).
