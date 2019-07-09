@@ -82,8 +82,8 @@ stop(N) ->
     stop(N - 1).
 
 -spec node_down(atom(), non_neg_integer()) -> no_return().
-node_down(PoolName, _FailedWorkerCount) ->
-    shackle_utils:warning_msg(?MODULE, "cassandra connection pool down! ~p failed workers ~p", [PoolName]),
+node_down(PoolName, FailedWorkerCount) ->
+    shackle_utils:warning_msg(?MODULE, "cassandra connection pool down! ~p failed workers ~p", [PoolName, FailedWorkerCount]),
     ets:insert(?MODULE, {PoolName, true}).
 
 -spec node_up(atom(), non_neg_integer()) -> no_return().
