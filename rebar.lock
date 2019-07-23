@@ -17,8 +17,4 @@
   {git,"git@github.com:tigertext/shackle.git",
        {ref,"b8afc43398a5f67f28948562ee86e37a2df52ec4"}},
   0}]}.
-[
-{pkg_hash,[
- {<<"granderl">>, <<"F20077A68BD80B8D8783BD15A052813C6483771DEC1A5B837D307CBE92F14122">>},
- {<<"metal">>, <<"5D3D1322DA7BCD34B94FED5486F577973685298883954F7A3E517EF5EF6953F5">>}]}
-].
+
