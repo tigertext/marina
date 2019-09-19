@@ -97,8 +97,8 @@ handle_data(Data, #state {
         buffer = Buffer2
     }}.
 
--spec handle_timeout(external_request_id(), term()) ->
-    {ok, Response :: response(), State :: term()} |
+-spec handle_timeout(RequestId :: term(), State :: term()) ->
+    {ok, Response :: term(), State :: term()} |
     {error,  Reason :: term(), State :: term()}.
 
 handle_timeout(_RequestId, State) ->
