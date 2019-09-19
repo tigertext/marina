@@ -10,6 +10,7 @@
     setup/2,
     handle_request/2,
     handle_data/2,
+    handle_timeout/2,
     terminate/1
 ]).
 
@@ -95,6 +96,13 @@ handle_data(Data, #state {
     {ok, Replies, State#state {
         buffer = Buffer2
     }}.
+
+-spec handle_timeout(external_request_id(), term()) ->
+    {ok, Response :: response(), State :: term()} |
+    {error,  Reason :: term(), State :: term()}.
+
+handle_timeout(_RequestId, State) ->
+    {ok, timeout, State}.
 
 -spec terminate(state()) ->
     ok.
