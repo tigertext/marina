@@ -102,7 +102,7 @@ handle_data(Data, #state {
     {error,  Reason :: term(), State :: term()}.
 
 handle_timeout(_RequestId, State) ->
-    {ok, timeout, State}.
+    {ok, {RequestId, {error, timeout}}, State}.
 
 -spec terminate(state()) ->
     ok.
