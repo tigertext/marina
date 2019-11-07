@@ -22,6 +22,7 @@
     node_count    :: undefined | pos_integer(),
     nodes         :: list(),
     port          :: pos_integer(),
+    racks         :: list(),
     strategy      :: random | token_aware,
     timer_ref     :: undefined | reference()
 }).
@@ -42,6 +43,7 @@ start_link() ->
 init(_Name, _Parent, undefined) ->
     BootstrapIps = ?GET_ENV(bootstrap_ips, ?DEFAULT_BOOTSTRAP_IPS),
     Port = ?GET_ENV(port, ?DEFAULT_PORT),
+    Racks = ?GET_ENV(racks, ?DEFAULT_RACKS),
     Strategy = ?GET_ENV(strategy, ?DEFAULT_STRATEGY),
 
     self() ! ?MSG_BOOTSTRAP,
@@ -49,6 +51,7 @@ init(_Name, _Parent, undefined) ->
     {ok, #state {
         bootstrap_ips = BootstrapIps,
         port = Port,
+        racks = Racks,
         strategy = Strategy
     }}.
 
@@ -58,10 +61,11 @@ init(_Name, _Parent, undefined) ->
 handle_msg(?MSG_BOOTSTRAP, #state {
         bootstrap_ips = BootstrapIps,
         port = Port,
+        racks = Racks,
         strategy = Strategy
     } = State) ->
 
-    case nodes(BootstrapIps, Port) of
+    case nodes(BootstrapIps, Port, Racks) of
         {ok, Nodes} ->
             marina_pool:start(Strategy, Nodes),
             timer:send_after(1000, self(), ?MSG_PEER_WATCHER),
@@ -78,10 +82,11 @@ handle_msg(?MSG_BOOTSTRAP, #state {
 handle_msg(?MSG_PEER_WATCHER, #state {
         bootstrap_ips = BootstrapIps,
         port = Port,
+        racks = Racks,
         strategy = Strategy,
         nodes = OldNodes
     } = State) ->
-    case nodes(BootstrapIps, Port) of
+    case nodes(BootstrapIps, Port, Racks) of
         {ok, Nodes} ->
             NodesToStart = Nodes -- OldNodes,
             NodesToStop = OldNodes -- Nodes,
@@ -131,30 +136,34 @@ connect(Ip, Port) ->
             {error, Reason}
     end.
 
-filter_datacenter([], _Datacenter) ->
+filter_datacenter_and_racks([], _Datacenter, _Configured_Racks) ->
     [];
-filter_datacenter([[RpcAddress, _Datacenter, Tokens] | T], undefined) ->
-    [{RpcAddress, Tokens} | filter_datacenter(T, undefined)];
-filter_datacenter([[RpcAddress, Datacenter, Tokens] | T], Datacenter) ->
-    [{RpcAddress, Tokens} | filter_datacenter(T, Datacenter)];
-filter_datacenter([_ | T], Datacenter) ->
-    filter_datacenter(T, Datacenter).
+filter_datacenter_and_racks([[RpcAddress, Datacenter, Rack, Tokens] | T], Retrieved_Datacenter, Configured_Racks) when Retrieved_Datacenter == undefied; Retrieved_Datacenter == Datacenter->
+    case matches_racks(Rack, Configured_Racks) of
+        true -> [{RpcAddress, Tokens} | filter_datacenter_and_racks(T, Retrieved_Datacenter, Configured_Racks)];
+        false -> filter_datacenter_and_racks(T, Retrieved_Datacenter, Configured_Racks)
+    end;
+filter_datacenter_and_racks([_ | T], Datacenter, Configured_Racks) ->
+    filter_datacenter_and_racks(T, Datacenter, Configured_Racks).
 
-nodes([], _Port) ->
+matches_racks(_Rack, []) -> true;
+matches_racks( Rack, Configured_Racks) -> lists:member(Rack, Configured_Racks).
+
+nodes([], _Port, _Racks) ->
     {error, bootstrap_failed};
-nodes([Ip | T], Port) ->
+nodes([Ip | T], Port, Racks) ->
     case peers(Ip, Port) of
         {ok, Rows, Datacenter} ->
-            case filter_datacenter(Rows, Datacenter) of
+            case filter_datacenter_and_racks(Rows, Datacenter, Racks) of
                 [] ->
-                    nodes(T, Port);
+                    nodes(T, Port, Racks);
                 Nodes ->
                     {ok, Nodes}
             end;
         {error, Reason} ->
             shackle_utils:warning_msg(?MODULE,
                 "bootstrap error: ~p~n", [Reason]),
-            nodes(T, Port)
+            nodes(T, Port, Racks)
     end.
 
 peers(Ip, Port) ->
@@ -169,7 +178,7 @@ peers(Ip, Port) ->
 
 peers_query(Socket) ->
     {ok, {result, _ , _, Rows}} = marina_utils:query(Socket, ?LOCAL_QUERY),
-    [[_RpcAddress, Datacenter, _Tokens]] = Rows,
+    [[_RpcAddress, Datacenter, _Racks, _Tokens]] = Rows,
     {ok, {result, _ , _, Rows2}} = marina_utils:query(Socket, ?PEERS_QUERY),
     {ok, Rows ++ Rows2, Datacenter}.
 
