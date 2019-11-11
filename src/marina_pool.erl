@@ -172,7 +172,7 @@ start_node(<<A, B, C, D>> = RpcAddress) ->
         {pool_failure_callback_module, ?MODULE},
         {pool_recover_callback_module, ?MODULE}
     ],
-    
+
     case shackle_pool:start(NodeId, ?CLIENT, ClientOptions, PoolOptions) of
         ok ->
             {ok, NodeId};
@@ -183,7 +183,7 @@ start_node(<<A, B, C, D>> = RpcAddress) ->
 stop_nodes(NodesToStop, Strategy, NewNodes) ->
     L1 = length(NewNodes),
     L2 = L1 + length(NodesToStop),
-    
+
     %% update pool dispatch first.
     %% insert updated nodes into foil.
     lists:foldl(fun({RpcAddress, _Token}, N) ->
@@ -191,18 +191,18 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
         foil:insert(?MODULE, {node, N}, NodeId),
         N + 1
                 end, 1, NewNodes),
-    
+
     %% if strategy is token aware, rebuild the ring.
     (Strategy == token_aware) andalso marina_ring:build(NewNodes),
-    
+
     %% update strategy
     foil:insert(?MODULE, strategy, {Strategy, L1}),
-    
+
     %% delete old nodes from foil.
     [foil:delete(?MODULE, {node, X}) || X<- lists:seq(L1+1, L2)],
     %% reload foil.
     foil:load(?MODULE),
-    
+
     %% delete stopped nodes from node down list
     %% and stop the corresponding pool
     [
@@ -213,6 +213,6 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
         end || {RpcAddress, _} <- NodesToStop
     ].
 
-    
+
 is_node_down(NodeName) ->
     ets:lookup(?MODULE, NodeName) /= [].
