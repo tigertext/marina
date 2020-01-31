@@ -5,7 +5,7 @@
   0},
  {<<"granderl">>,{pkg,<<"granderl">>,<<"0.1.5">>},1},
  {<<"lz4">>,
-  {git,"git@github.com:tigertext/erlang-lz4.git",
+  {git,"https://github.com/tigertext/erlang-lz4.git",
        {ref,"e7ccf4fc9a806982055f26772522c3543c89d1b5"}},
   0},
  {<<"metal">>,{pkg,<<"metal">>,<<"0.1.1">>},1},
