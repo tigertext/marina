@@ -139,7 +139,7 @@ connect(Ip, Port) ->
 filter_datacenter_and_racks([], _Datacenter, _Configured_Racks) ->
     [];
 filter_datacenter_and_racks([[RpcAddress, Datacenter, Rack, Tokens] | T], Retrieved_Datacenter, Configured_Racks)
-    when Retrieved_Datacenter == undefied; Retrieved_Datacenter == Datacenter->
+    when Retrieved_Datacenter == undefined; Retrieved_Datacenter == Datacenter->
     case matches_racks(Rack, Configured_Racks) of
         true -> [{RpcAddress, Tokens} | filter_datacenter_and_racks(T, Retrieved_Datacenter, Configured_Racks)];
         false -> filter_datacenter_and_racks(T, Retrieved_Datacenter, Configured_Racks)
