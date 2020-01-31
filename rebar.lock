@@ -10,11 +10,11 @@
   0},
  {<<"metal">>,{pkg,<<"metal">>,<<"0.1.1">>},1},
  {<<"murmur">>,
-  {git,"git@github.com:tigertext/murmur.git",
+  {git,"https://github.com/tigertext/murmur.git",
        {ref,"b256d0da5ee04cea637290ec434bf30539b28546"}},
   0},
  {<<"shackle">>,
-  {git,"git@github.com:tigertext/shackle.git",
+  {git,"https://github.com/tigertext/shackle.git",
        {ref,"b8afc43398a5f67f28948562ee86e37a2df52ec4"}},
   0}]}.
 
