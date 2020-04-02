@@ -120,7 +120,13 @@ check_node({ok, Node}, Strategy, _RoutingKey, N) ->
             %% remove routing key to fallback to random or token_aware without routing key.
             node(Strategy, undefined, N+1);
         false ->
-            {ok, Node}
+            case marina_bucket:accquire_ticket(Node) of
+                error ->
+                    shackle_utils:warning_msg(?MODULE, "failed to accquire ticket from work pool ~p, retrying", [Node]),
+                    node(Strategy, undefined, N+1);
+                ok ->
+                    {ok, Node}
+            end
     end.
 
 start_nodes([], random, N) ->
@@ -175,6 +181,7 @@ start_node(<<A, B, C, D>> = RpcAddress) ->
 
     case shackle_pool:start(NodeId, ?CLIENT, ClientOptions, PoolOptions) of
         ok ->
+            marina_bucket:start_link(NodeId),
             {ok, NodeId};
         {error, Reason} ->
             {error, Reason}
