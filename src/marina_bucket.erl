@@ -60,9 +60,9 @@ acquire_ticket(Pool) ->
     {stop, Reason :: term(), NewState :: #{}}).
 
 handle_call(increase_max_ticket, _, State = #{max_ticket := Max}) when Max < ?STOP_POLLING_THRESHOLD ->
+    schedule_poll(self()),
     {reply, ok, State#{max_ticket => Max + 1}};
-handle_call(increase_max_ticket, _, State = #{tref := TRef})  ->
-    stop_polling(TRef),
+handle_call(increase_max_ticket, _, State)  ->
     {reply, ignored, State#{tref => undefined}};
 %% too many tickets checkedout, only allow return, don't allow accquire any more.
 handle_call(acquire_ticket, {From, _Ref}, State = #{checkedout_ticket := T, max_ticket := Max, name := Pool}) when T >= Max ->
@@ -147,21 +147,14 @@ code_change(_OldVsn, State = #{}, _Extra) ->
 to_name(Pool) ->
     list_to_atom(atom_to_list(Pool) ++ "__bucket").
 
-start_polling() ->
-    {ok, Ref} = timer:send_interval(300, self(), poll),
-    Ref.
-
-stop_polling(Ref) ->
-    timer:cancel(Ref).
-
 poll(Pool) ->
+    Name = to_name(Pool),
     case shackle:call(Pool, {{query, <<"select peer from system.peers limit 1">>}, #{}}, 100) of
         {ok, _} ->
             lager:info("marina node ~p recovered, increasing max tickets ", [Pool]),
-            Name = to_name(Pool),
             gen_server:call(Name, increase_max_ticket);
         _ ->
-            ok
+            schedule_poll(Name)
     end.
 
 checkout_ticket(From, State = #{name := Pool, checkedout_ticket := Tickets, bucket := Dict}) ->
@@ -185,16 +178,20 @@ adjust_max_tickets({ok, _}, State = #{max_ticket := Max}) ->
     end;
 adjust_max_tickets({error, timeout}, State = #{max_ticket := Max, name := Pool, checkedout_ticket := T}) ->
     NewMax = Max div 2,
+    Name = to_name(Pool),
     lager:warning("marina node ~p seens too busy, reduced max tickets to ~p, currently checkedout ~p", [Pool, NewMax, T]),
     case NewMax < 1 of
         %% the pool has been disabled
         true ->
             lager:error("marina no tickets available for node ~p, traffic will not be routed to this node ", [Pool]),
-            Ref = start_polling(),
-            State#{max_ticket => NewMax, tref => Ref};
+            schedule_poll(Name),
+            State#{max_ticket => NewMax};
         false ->
             State#{max_ticket => NewMax}
     end;
 adjust_max_tickets(_, State) -> State.
 
 
+schedule_poll(Name) ->
+    {ok, Ref} = timer:send_after(100, Name, poll),
+    Ref.
