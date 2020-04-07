@@ -93,11 +93,11 @@ async_reusable_query(Pool, Query, QueryOpts) ->
 
 call(Msg, QueryOpts) ->
     RoutingKey = marina_utils:query_opts(routing_key, QueryOpts),
-    %% select a node and accquire a ticket
+    %% select a node and acquire a ticket
     case marina_pool:node(RoutingKey) of
         {ok, Pool} ->
             Result = call(Pool, Msg, QueryOpts),
-            marina_bucket:return_ticket(Pool),
+            marina_bucket:return_ticket(Pool, Result),
             Result;
         {error, Reason} ->
             {error, Reason}

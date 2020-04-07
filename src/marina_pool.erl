@@ -120,7 +120,7 @@ check_node({ok, Node}, Strategy, _RoutingKey, N) ->
             %% remove routing key to fallback to random or token_aware without routing key.
             node(Strategy, undefined, N+1);
         false ->
-            case marina_bucket:accquire_ticket(Node) of
+            case marina_bucket:acquire_ticket(Node) of
                 error ->
                     shackle_utils:warning_msg(?MODULE, "failed to accquire ticket from work pool ~p, retrying", [Node]),
                     node(Strategy, undefined, N+1);

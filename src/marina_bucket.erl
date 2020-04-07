@@ -1,10 +1,10 @@
 -module(marina_bucket).
 -author("anders").
-
+-compile([export_all]).
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, return_ticket/1, accquire_ticket/1]).
+-export([start_link/1, return_ticket/2, acquire_ticket/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
@@ -12,7 +12,8 @@
 
 -define(SERVER, ?MODULE).
 
--define(DEFAULT_TICKET, 10).
+-define(MAX_TICKET, 1000).
+-define(STOP_POLLING_THRESHOLD, 300).
 
 %%%===================================================================
 %%% API
@@ -35,17 +36,17 @@ start_link(NodeId) ->
     {ok, State :: #{}} | {ok, State :: #{}, timeout() | hibernate} |
     {stop, Reason :: term()} | ignore).
 init([Name]) ->
-    {ok, #{ticket => ?DEFAULT_TICKET, name => Name, bucket => dict:new()}}.
+    {ok, #{checkedout_ticket => 0, max_ticket => ?MAX_TICKET, name => Name, bucket => dict:new()}}.
 
--spec return_ticket(atom()) -> ok.
-return_ticket(Pool) ->
+-spec return_ticket(atom(), any()) -> ok.
+return_ticket(Pool, Reason) ->
     Name = to_name(Pool),
-    gen_server:call(Name, return_ticket).
+    gen_server:call(Name, {return_ticket, Reason}).
 
--spec accquire_ticket(atom()) -> ok | error.
-accquire_ticket(Pool) ->
+-spec acquire_ticket(atom()) -> ok | error.
+acquire_ticket(Pool) ->
     Name = to_name(Pool),
-    gen_server:call(Name, accquire_ticket).
+    gen_server:call(Name, acquire_ticket).
 
 %% @private
 %% @doc Handling call messages
@@ -57,23 +58,22 @@ accquire_ticket(Pool) ->
     {noreply, NewState :: #{}, timeout() | hibernate} |
     {stop, Reason :: term(), Reply :: term(), NewState :: #{}} |
     {stop, Reason :: term(), NewState :: #{}}).
-handle_call(accquire_ticket, {From, _Ref}, State = #{ticket := T, name := Pool}) when T < 1 ->
-    shackle_utils:warning_msg(?MODULE, "cannot aacquire tickets!! pool ~p from ~p", [Pool, From]),
+
+handle_call(increase_max_ticket, _, State = #{max_ticket := Max}) when Max < ?STOP_POLLING_THRESHOLD ->
+    {reply, ok, State#{max_ticket => Max + 1}};
+handle_call(increase_max_ticket, _, State = #{tref := TRef})  ->
+    stop_polling(TRef),
+    {reply, ignored, State#{tref => undefined}};
+%% too many tickets checkedout, only allow return, don't allow accquire any more.
+handle_call(acquire_ticket, {From, _Ref}, State = #{checkedout_ticket := T, max_ticket := Max, name := Pool}) when T >= Max ->
+    lager:warning("cannot aacquire tickets!! pool ~p from ~p, waiting for all tickets to be returned, checkedout ~p, max ~p", [Pool, From, T, Max]),
     {reply, error, State};
-%% a pid accquire a ticket, give the ticket to the process and descrease the total number of etickets;
-handle_call(accquire_ticket, {From, _Ref}, State = #{name := Pool, ticket := Tickets, bucket := Dict}) ->
-    shackle_utils:warning_msg(?MODULE, "accquire ticket from pool ~p, current tickets: ~p", [Pool, Tickets]),
-    Dict1 =
-    case dict:find(From, Dict) of
-        error ->
-            dict:store(From, 1, Dict);
-        {ok, N} ->
-            dict:store(From, N+1, Dict)
-    end,
-    monitor(process, From),
-    {reply, ok, State#{ticket => (Tickets - 1), bucket => Dict1}};
-handle_call(return_ticket, {From, _Ref},  State = #{name := Pool, ticket := Tickets, bucket := Dict}) ->
-    shackle_utils:warning_msg(?MODULE, "release ticket from pool ~p, current tickets: ~p", [Pool, Tickets]),
+%% a pid acquires a ticket, give the ticket to the process and descrease the total number of etickets;
+handle_call(acquire_ticket, {From, _Ref}, State) ->
+    State1 = checkout_ticket(From, State),
+    {reply, ok, State1};
+handle_call({return_ticket, Reason}, {From, _Ref},  State = #{name := Pool, checkedout_ticket := Tickets, max_ticket := Max, bucket := Dict}) ->
+    lager:debug("release ticket from pool ~p, current tickets: ~p", [Pool, Tickets]),
     {Dict1, TicketsToReturn} =
         case dict:find(From, Dict) of
             error ->
@@ -85,8 +85,8 @@ handle_call(return_ticket, {From, _Ref},  State = #{name := Pool, ticket := Tick
             {ok, N} when N>1->
                 {dict:store(From, N-1, Dict), 1}
         end,
-    {reply, ok, State#{ticket => (Tickets + TicketsToReturn), bucket => Dict1}}.
-
+    NewState = adjust_max_tickets(Reason, State),
+    {reply, ok, NewState#{checkedout_ticket => (Tickets - TicketsToReturn), bucket => Dict1}}.
 
 %% @private
 %% @doc Handling cast messages
@@ -103,9 +103,9 @@ handle_cast(_Request, State = #{}) ->
     {noreply, NewState :: #{}} |
     {noreply, NewState :: #{}, timeout() | hibernate} |
     {stop, Reason :: term(), NewState :: #{}}).
-handle_info({'DOWN', _MonitorRef, process, From, _Info}, State = #{name := Pool, ticket := Tickets, bucket := Dict}) ->
+handle_info({'DOWN', _MonitorRef, process, From, _Info}, State = #{name := Pool, checkedout_ticket := Tickets, bucket := Dict}) ->
     %% process down
-    shackle_utils:warning_msg(?MODULE, "release ticket from pool ~p, current tickets: ~p", [Pool, Tickets]),
+    lager:info("marina release ticket from pool ~p, process down ~p current tickets: ~p", [Pool, From, Tickets]),
     {Dict1,  TicketsToReturn} =
         case dict:find(From, Dict) of
             error ->
@@ -114,9 +114,12 @@ handle_info({'DOWN', _MonitorRef, process, From, _Info}, State = #{name := Pool,
             {ok, N} ->
                 {dict:erase(From, Dict), N}
         end,
-    {noreply, State#{ticket => (Tickets + TicketsToReturn), bucket => Dict1}};
+    {noreply, State#{checkedout_ticket => (Tickets - TicketsToReturn), bucket => Dict1}};
     
-handle_info(_Info, State = #{}) ->
+handle_info(poll, State = #{name := Pool}) ->
+    spawn(fun() -> poll(Pool) end),
+    {noreply, State};
+handle_info(_Info, State) ->
     {noreply, State}.
 
 %% @private
@@ -143,3 +146,55 @@ code_change(_OldVsn, State = #{}, _Extra) ->
 
 to_name(Pool) ->
     list_to_atom(atom_to_list(Pool) ++ "__bucket").
+
+start_polling() ->
+    {ok, Ref} = timer:send_interval(300, self(), poll),
+    Ref.
+
+stop_polling(Ref) ->
+    timer:cancel(Ref).
+
+poll(Pool) ->
+    case shackle:call(Pool, {{query, <<"select peer from system.peers limit 1">>}, #{}}, 100) of
+        {ok, _} ->
+            lager:info("marina node ~p recovered, increasing max tickets ", [Pool]),
+            Name = to_name(Pool),
+            gen_server:call(Name, increase_max_ticket);
+        _ ->
+            ok
+    end.
+
+checkout_ticket(From, State = #{name := Pool, checkedout_ticket := Tickets, bucket := Dict}) ->
+    lager:debug("marina accquire ticket from pool ~p, current tickets: ~p", [Pool, Tickets]),
+    Dict1 =
+        case dict:find(From, Dict) of
+            error ->
+                dict:store(From, 1, Dict);
+            {ok, N} ->
+                dict:store(From, N + 1, Dict)
+        end,
+    monitor(process, From),
+    State#{checkedout_ticket => (Tickets + 1), bucket => Dict1}.
+
+adjust_max_tickets({ok, _}, State = #{max_ticket := Max}) ->
+    case Max < ?MAX_TICKET of
+        true ->
+            State#{max_ticket => Max + 1};
+        _ ->
+            State
+    end;
+adjust_max_tickets({error, timeout}, State = #{max_ticket := Max, name := Pool, checkedout_ticket := T}) ->
+    NewMax = Max div 2,
+    lager:warning("marina node ~p seens too busy, reduced max tickets to ~p, currently checkedout ~p", [Pool, NewMax, T]),
+    case NewMax < 1 of
+        %% the pool has been disabled
+        true ->
+            lager:error("marina no tickets available for node ~p, traffic will not be routed to this node ", [Pool]),
+            Ref = start_polling(),
+            State#{max_ticket => NewMax, tref => Ref};
+        false ->
+            State#{max_ticket => NewMax}
+    end;
+adjust_max_tickets(_, State) -> State.
+
+
