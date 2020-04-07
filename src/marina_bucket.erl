@@ -4,7 +4,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, return_ticket/2, acquire_ticket/1]).
+-export([start_link/1, return_ticket/2, acquire_ticket/1, stop/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
@@ -48,6 +48,10 @@ acquire_ticket(Pool) ->
     Name = to_name(Pool),
     gen_server:call(Name, acquire_ticket).
 
+stop(Pool) ->
+    Name = to_name(Pool),
+    gen_server:call(Name, stop).
+
 %% @private
 %% @doc Handling call messages
 -spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
@@ -62,7 +66,7 @@ acquire_ticket(Pool) ->
 handle_call(increase_max_ticket, _, State = #{max_ticket := Max}) when Max < ?STOP_POLLING_THRESHOLD ->
     schedule_poll(self()),
     {reply, ok, State#{max_ticket => Max + 1}};
-handle_call(increase_max_ticket, _, State)  ->
+handle_call(increase_max_ticket, _, State) ->
     {reply, ignored, State#{tref => undefined}};
 %% too many tickets checkedout, only allow return, don't allow accquire any more.
 handle_call(acquire_ticket, {From, _Ref}, State = #{checkedout_ticket := T, max_ticket := Max, name := Pool}) when T >= Max ->
@@ -72,7 +76,7 @@ handle_call(acquire_ticket, {From, _Ref}, State = #{checkedout_ticket := T, max_
 handle_call(acquire_ticket, {From, _Ref}, State) ->
     State1 = checkout_ticket(From, State),
     {reply, ok, State1};
-handle_call({return_ticket, Reason}, {From, _Ref},  State = #{name := Pool, checkedout_ticket := Tickets, max_ticket := Max, bucket := Dict}) ->
+handle_call({return_ticket, Reason}, {From, _Ref}, State = #{name := Pool, checkedout_ticket := Tickets, max_ticket := Max, bucket := Dict}) ->
     lager:debug("release ticket from pool ~p, current tickets: ~p", [Pool, Tickets]),
     {Dict1, TicketsToReturn} =
         case dict:find(From, Dict) of
@@ -82,11 +86,13 @@ handle_call({return_ticket, Reason}, {From, _Ref},  State = #{name := Pool, chec
                 {Dict, 0};
             {ok, 1} ->
                 {dict:erase(From, Dict), 1};
-            {ok, N} when N>1->
-                {dict:store(From, N-1, Dict), 1}
+            {ok, N} when N > 1 ->
+                {dict:store(From, N - 1, Dict), 1}
         end,
     NewState = adjust_max_tickets(Reason, State),
-    {reply, ok, NewState#{checkedout_ticket => (Tickets - TicketsToReturn), bucket => Dict1}}.
+    {reply, ok, NewState#{checkedout_ticket => (Tickets - TicketsToReturn), bucket => Dict1}};
+handle_call(stop, _From, State) ->
+    {stop, normal, State}.
 
 %% @private
 %% @doc Handling cast messages
@@ -106,7 +112,7 @@ handle_cast(_Request, State = #{}) ->
 handle_info({'DOWN', _MonitorRef, process, From, _Info}, State = #{name := Pool, checkedout_ticket := Tickets, bucket := Dict}) ->
     %% process down
     lager:info("marina release ticket from pool ~p, process down ~p current tickets: ~p", [Pool, From, Tickets]),
-    {Dict1,  TicketsToReturn} =
+    {Dict1, TicketsToReturn} =
         case dict:find(From, Dict) of
             error ->
                 %% all tickets for the process have been returned.
@@ -115,7 +121,7 @@ handle_info({'DOWN', _MonitorRef, process, From, _Info}, State = #{name := Pool,
                 {dict:erase(From, Dict), N}
         end,
     {noreply, State#{checkedout_ticket => (Tickets - TicketsToReturn), bucket => Dict1}};
-    
+
 handle_info(poll, State = #{name := Pool}) ->
     spawn(fun() -> poll(Pool) end),
     {noreply, State};
@@ -145,7 +151,11 @@ code_change(_OldVsn, State = #{}, _Extra) ->
 %%%===================================================================
 
 to_name(Pool) ->
-    list_to_atom(atom_to_list(Pool) ++ "__bucket").
+    try
+        list_to_existing_atom(atom_to_list(Pool) ++ "__bucket")
+    catch _:_ ->
+        list_to_atom(atom_to_list(Pool) ++ "__bucket")
+    end.
 
 poll(Pool) ->
     Name = to_name(Pool),

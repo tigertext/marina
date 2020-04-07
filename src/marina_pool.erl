@@ -216,7 +216,12 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
         begin
             NodeId = node_id(RpcAddress),
             ets:delete(?MODULE, NodeId),
-            shackle_pool:stop(NodeId)
+            try
+                shackle_pool:stop(NodeId),
+                marina_bucket:stop(NodeId)
+            catch _:_ ->
+                ok
+            end
         end || {RpcAddress, _} <- NodesToStop
     ].
 
