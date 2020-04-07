@@ -1,6 +1,6 @@
 -module(marina_bucket).
 -author("anders").
--compile([export_all]).
+-compile([{parse_transform, lager_transform}]).
 -behaviour(gen_server).
 
 %% API
