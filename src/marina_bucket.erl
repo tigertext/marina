@@ -14,6 +14,14 @@
 
 -define(MAX_TICKET, 1000).
 -define(STOP_POLLING_THRESHOLD, 300).
+-define(ETS_TABLE, marina_work_pool_tickets).
+
+-record(ticket_bucket, {
+    name,
+    checkedout_ticket = 0,
+    max_ticket = ?MAX_TICKET,
+    bucket = bucket:new()
+}).
 
 %%%===================================================================
 %%% API
@@ -36,20 +44,59 @@ start_link(NodeId) ->
     {ok, State :: #{}} | {ok, State :: #{}, timeout() | hibernate} |
     {stop, Reason :: term()} | ignore).
 init([Name]) ->
-    {ok, #{checkedout_ticket => 0, max_ticket => ?MAX_TICKET, name => Name, bucket => dict:new()}}.
+    case ets:info(?ETS_TABLE) of
+        undefined ->
+            ets:new(?ETS_TABLE, [public, set, named_table, {keypos, #ticket_bucket.name}]);
+        _ ->
+            ok
+    end,
+    ets:insert(?ETS_TABLE, #ticket_bucket{bucket = dict:new(), name = Name}),
+    {ok, #{name => Name}}.
 
 -spec return_ticket(atom(), any()) -> ok.
 return_ticket(Pool, Reason) ->
-    Name = to_name(Pool),
-    gen_server:call(Name, {return_ticket, Reason}).
+    return_ticket(Pool, Reason, self()).
+return_ticket(Pool, Reason, From) ->
+    F = fun() ->
+        [Ticket = #ticket_bucket{name = Pool, checkedout_ticket = Tickets, bucket = Dict}] = ets:lookup(?ETS_TABLE, Pool),
+        lager:debug("release ticket from pool ~p, current tickets: ~p", [Pool, Tickets]),
+        {Dict1, TicketsToReturn} =
+            case dict:find(From, Dict) of
+                error ->
+                    {Dict, 0};
+                {ok, 1} ->
+                    {dict:erase(From, Dict), 1};
+                {ok, N} when N > 1 ->
+                    {dict:store(From, N - 1, Dict), 1}
+            end,
+        NewMax = adjust_max_tickets(Reason, Ticket),
+        ets:update_counter(?ETS_TABLE, Pool, {#ticket_bucket.checkedout_ticket, -1 * TicketsToReturn}),
+        ets:update_element(?ETS_TABLE, Pool, {#ticket_bucket.max_ticket, NewMax}),
+        ets:update_element(?ETS_TABLE, Pool, {#ticket_bucket.bucket, Dict1})
+        end,
+    spawn(F).
 
 -spec acquire_ticket(atom()) -> ok | error.
 acquire_ticket(Pool) ->
-    Name = to_name(Pool),
-    gen_server:call(Name, acquire_ticket).
+    From = self(),
+    [TicketState = #ticket_bucket{name = Pool, checkedout_ticket = Tickets, max_ticket = Max}] = ets:lookup(?ETS_TABLE, Pool),
+    case Tickets >= Max of
+        true ->
+            lager:warning("cannot aacquire tickets!! pool ~p from ~p, waiting for all tickets to be returned, checkedout ~p, max ~p", [Pool, From, Tickets, Max]),
+            error;
+        false ->
+            F = fun() ->
+                NewBucket = checkout_ticket(From, TicketState),
+                ets:update_counter(?ETS_TABLE, Pool, {#ticket_bucket.checkedout_ticket, 1}),
+                ets:update_element(?ETS_TABLE, Pool, {#ticket_bucket.bucket, NewBucket}),
+                gen_server:cast(to_name(Pool), {monitor, From})
+                end,
+            spawn(F)
+    end.
 
 stop(Pool) ->
     Name = to_name(Pool),
+    ets:delete(?ETS_TABLE, Pool),
     gen_server:call(Name, stop).
 
 %% @private
@@ -63,34 +110,16 @@ stop(Pool) ->
     {stop, Reason :: term(), Reply :: term(), NewState :: #{}} |
     {stop, Reason :: term(), NewState :: #{}}).
 
-handle_call(increase_max_ticket, _, State = #{max_ticket := Max}) when Max < ?STOP_POLLING_THRESHOLD ->
-    schedule_poll(self()),
-    {reply, ok, State#{max_ticket => Max + 1}};
-handle_call(increase_max_ticket, _, State) ->
-    {reply, ignored, State#{tref => undefined}};
-%% too many tickets checkedout, only allow return, don't allow accquire any more.
-handle_call(acquire_ticket, {From, _Ref}, State = #{checkedout_ticket := T, max_ticket := Max, name := Pool}) when T >= Max ->
-    lager:warning("cannot aacquire tickets!! pool ~p from ~p, waiting for all tickets to be returned, checkedout ~p, max ~p", [Pool, From, T, Max]),
-    {reply, error, State};
-%% a pid acquires a ticket, give the ticket to the process and descrease the total number of etickets;
-handle_call(acquire_ticket, {From, _Ref}, State) ->
-    State1 = checkout_ticket(From, State),
-    {reply, ok, State1};
-handle_call({return_ticket, Reason}, {From, _Ref}, State = #{name := Pool, checkedout_ticket := Tickets, max_ticket := Max, bucket := Dict}) ->
-    lager:debug("release ticket from pool ~p, current tickets: ~p", [Pool, Tickets]),
-    {Dict1, TicketsToReturn} =
-        case dict:find(From, Dict) of
-            error ->
-                %% some process going to return a ticket but it is not recorded, there must be a leak
-                %% TODO: fix possible leak
-                {Dict, 0};
-            {ok, 1} ->
-                {dict:erase(From, Dict), 1};
-            {ok, N} when N > 1 ->
-                {dict:store(From, N - 1, Dict), 1}
-        end,
-    NewState = adjust_max_tickets(Reason, State),
-    {reply, ok, NewState#{checkedout_ticket => (Tickets - TicketsToReturn), bucket => Dict1}};
+handle_call(increase_max_ticket, _, State = #{name := Pool}) ->
+    [#ticket_bucket{max_ticket = Max}] = ets:lookup(?ETS_TABLE, Pool),
+    case Max < ?STOP_POLLING_THRESHOLD of
+        true ->
+            schedule_poll(self()),
+            ets:update_element(?ETS_TABLE, Pool, {#ticket_bucket.max_ticket, Max + 1}),
+            {reply, ok, State};
+        false ->
+            {reply, ignored, State}
+    end;
 handle_call(stop, _From, State) ->
     {stop, normal, State}.
 
@@ -100,6 +129,9 @@ handle_call(stop, _From, State) ->
     {noreply, NewState :: #{}} |
     {noreply, NewState :: #{}, timeout() | hibernate} |
     {stop, Reason :: term(), NewState :: #{}}).
+handle_cast({monitor, Pid}, State) ->
+    erlang:monitor(process, Pid),
+    {noreply, State};
 handle_cast(_Request, State = #{}) ->
     {noreply, State}.
 
@@ -109,8 +141,9 @@ handle_cast(_Request, State = #{}) ->
     {noreply, NewState :: #{}} |
     {noreply, NewState :: #{}, timeout() | hibernate} |
     {stop, Reason :: term(), NewState :: #{}}).
-handle_info({'DOWN', _MonitorRef, process, From, _Info}, State = #{name := Pool, checkedout_ticket := Tickets, bucket := Dict}) ->
+handle_info({'DOWN', _MonitorRef, process, From, _Info}, State = #{name := Pool}) ->
     %% process down
+    [#ticket_bucket{bucket = Dict, checkedout_ticket = Tickets}] = ets:lookup(?ETS_TABLE, Pool),
     lager:info("marina release ticket from pool ~p, process down ~p current tickets: ~p", [Pool, From, Tickets]),
     {Dict1, TicketsToReturn} =
         case dict:find(From, Dict) of
@@ -120,7 +153,9 @@ handle_info({'DOWN', _MonitorRef, process, From, _Info}, State = #{name := Pool,
             {ok, N} ->
                 {dict:erase(From, Dict), N}
         end,
-    {noreply, State#{checkedout_ticket => (Tickets - TicketsToReturn), bucket => Dict1}};
+    ets:update_counter(?ETS_TABLE, Pool, {#ticket_bucket.checkedout_ticket, -1 * TicketsToReturn}),
+    ets:update_element(?ETS_TABLE, Pool, {#ticket_bucket.bucket, Dict1}),
+    {noreply, State};
 
 handle_info(poll, State = #{name := Pool}) ->
     spawn(fun() -> poll(Pool) end),
@@ -167,7 +202,7 @@ poll(Pool) ->
             schedule_poll(Name)
     end.
 
-checkout_ticket(From, State = #{name := Pool, checkedout_ticket := Tickets, bucket := Dict}) ->
+checkout_ticket(From, #ticket_bucket{name = Pool, checkedout_ticket = Tickets, bucket = Dict}) ->
     lager:debug("marina accquire ticket from pool ~p, current tickets: ~p", [Pool, Tickets]),
     Dict1 =
         case dict:find(From, Dict) of
@@ -176,17 +211,16 @@ checkout_ticket(From, State = #{name := Pool, checkedout_ticket := Tickets, buck
             {ok, N} ->
                 dict:store(From, N + 1, Dict)
         end,
-    monitor(process, From),
-    State#{checkedout_ticket => (Tickets + 1), bucket => Dict1}.
+    Dict1.
 
-adjust_max_tickets({ok, _}, State = #{max_ticket := Max}) ->
+adjust_max_tickets({ok, _}, #ticket_bucket{max_ticket = Max}) ->
     case Max < ?MAX_TICKET of
         true ->
-            State#{max_ticket => Max + 1};
+            Max + 1;
         _ ->
-            State
+            Max
     end;
-adjust_max_tickets({error, timeout}, State = #{max_ticket := Max, name := Pool, checkedout_ticket := T}) ->
+adjust_max_tickets({error, timeout}, #ticket_bucket{max_ticket = Max, name = Pool, checkedout_ticket = T}) ->
     NewMax = Max div 2,
     Name = to_name(Pool),
     lager:warning("marina node ~p seens too busy, reduced max tickets to ~p, currently checkedout ~p", [Pool, NewMax, T]),
@@ -195,9 +229,9 @@ adjust_max_tickets({error, timeout}, State = #{max_ticket := Max, name := Pool, 
         true ->
             lager:error("marina no tickets available for node ~p, traffic will not be routed to this node ", [Pool]),
             schedule_poll(Name),
-            State#{max_ticket => NewMax};
+            NewMax;
         false ->
-            State#{max_ticket => NewMax}
+            NewMax
     end;
 adjust_max_tickets(_, State) -> State.
 
