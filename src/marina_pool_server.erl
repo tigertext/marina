@@ -103,7 +103,10 @@ handle_msg(?MSG_PEER_WATCHER, #state {
             {ok, State#state{
                 timer_ref = erlang:send_after(500, self(), ?MSG_PEER_WATCHER)
             }}
-    end.
+    end;
+%% ignore other messages
+handle_msg(_, State) ->
+    {ok, State}.
 
 
 -spec terminate(term(), state()) ->
