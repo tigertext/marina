@@ -118,9 +118,15 @@ check_node({ok, Node}, Strategy, _RoutingKey, N) ->
             shackle_utils:warning_msg(?MODULE, "get a dead node when finding node, node id ~p, retrying", [Node]),
             %% the selected node is marked as down.
             %% remove routing key to fallback to random or token_aware without routing key.
-            node(Strategy, undefined, N+1);
+            node(Strategy, undefined, N + 1);
         false ->
-            {ok, Node}
+            case marina_bucket:acquire_ticket(Node) of
+                error ->
+                    shackle_utils:warning_msg(?MODULE, "failed to accquire ticket from work pool ~p, retrying", [Node]),
+                    node(Strategy, undefined, N + 1);
+                ok ->
+                    {ok, Node}
+            end
     end.
 
 start_nodes([], random, N) ->
@@ -172,9 +178,13 @@ start_node(<<A, B, C, D>> = RpcAddress) ->
         {pool_failure_callback_module, ?MODULE},
         {pool_recover_callback_module, ?MODULE}
     ],
-
+    PeerMaxTickets = ?GET_ENV(peer_max_tickets, 1000),
+    PeerTimeoutReduceFactor = ?GET_ENV(peer_timeout_reduce_factor, 2),
+    PeerStopPollingThreshold = ?GET_ENV(peer_stop_polling_threshold, 300),
+    
     case shackle_pool:start(NodeId, ?CLIENT, ClientOptions, PoolOptions) of
         ok ->
+            marina_bucket:start_link(NodeId, PeerMaxTickets, PeerTimeoutReduceFactor, PeerStopPollingThreshold),
             {ok, NodeId};
         {error, Reason} ->
             {error, Reason}
@@ -209,7 +219,12 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
         begin
             NodeId = node_id(RpcAddress),
             ets:delete(?MODULE, NodeId),
-            shackle_pool:stop(NodeId)
+            try
+                shackle_pool:stop(NodeId),
+                marina_bucket:stop(NodeId)
+            catch _:_ ->
+                ok
+            end
         end || {RpcAddress, _} <- NodesToStop
     ].
 
