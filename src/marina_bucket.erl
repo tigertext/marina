@@ -4,7 +4,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, return_ticket/2, acquire_ticket/1, stop/1]).
+-export([start_link/4, return_ticket/2, acquire_ticket/1, stop/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
@@ -12,7 +12,6 @@
 
 -define(SERVER, ?MODULE).
 
--define(MAX_TICKET, 1000).
 -define(STOP_POLLING_THRESHOLD, 300).
 
 %%%===================================================================
@@ -20,11 +19,11 @@
 %%%===================================================================
 
 %% @doc Spawns the server and registers the local name (unique)
--spec(start_link(any()) ->
+-spec(start_link(any(), pos_integer(), float(), pos_integer()) ->
     {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
-start_link(NodeId) ->
+start_link(NodeId, PeerMaxTickets, PeerTimeoutDescreaseFactor, PeerStopPollingThreshold) ->
     Name = to_name(NodeId),
-    gen_server:start_link({local, Name}, ?MODULE, [NodeId], []).
+    gen_server:start_link({local, Name}, ?MODULE, [NodeId, PeerMaxTickets, PeerTimeoutDescreaseFactor, PeerStopPollingThreshold], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -35,8 +34,10 @@ start_link(NodeId) ->
 -spec(init(Args :: term()) ->
     {ok, State :: #{}} | {ok, State :: #{}, timeout() | hibernate} |
     {stop, Reason :: term()} | ignore).
-init([Name]) ->
-    {ok, #{checkedout_ticket => 0, max_ticket => ?MAX_TICKET, name => Name, bucket => dict:new()}}.
+init([Name, PeerMaxTickets, PeerTimeoutReduceFactor, PeerStopPollingThreshold]) ->
+    {ok, #{checkedout_ticket => 0, max_ticket => PeerMaxTickets, timeout_reduce_factor => PeerTimeoutReduceFactor,
+        stop_polling_threshold => PeerStopPollingThreshold, configured_max_ticket => PeerMaxTickets,
+        name => Name, bucket => dict:new()}}.
 
 -spec return_ticket(atom(), any()) -> ok.
 return_ticket(Pool, Reason) ->
@@ -63,14 +64,14 @@ stop(Pool) ->
     {stop, Reason :: term(), Reply :: term(), NewState :: #{}} |
     {stop, Reason :: term(), NewState :: #{}}).
 
-handle_call(increase_max_ticket, _, State = #{max_ticket := Max}) when Max < ?STOP_POLLING_THRESHOLD ->
+handle_call(increase_max_ticket, _, State = #{max_ticket := Max, stop_polling_threshold := STOP_POLLING_THRESHOLD}) when Max < STOP_POLLING_THRESHOLD ->
     schedule_poll(self()),
     {reply, ok, State#{max_ticket => Max + 1}};
 handle_call(increase_max_ticket, _, State) ->
     {reply, ignored, State#{tref => undefined}};
 %% too many tickets checkedout, only allow return, don't allow accquire any more.
 handle_call(acquire_ticket, {From, _Ref}, State = #{checkedout_ticket := T, max_ticket := Max, name := Pool}) when T >= Max ->
-    lager:warning("cannot aacquire tickets!! pool ~p from ~p, waiting for all tickets to be returned, checkedout ~p, max ~p", [Pool, From, T, Max]),
+    lager:warning("cannot acquire tickets!! pool ~p from ~p, waiting for all tickets to be returned, checkedout ~p, max ~p", [Pool, From, T, Max]),
     {reply, error, State};
 %% a pid acquires a ticket, give the ticket to the process and descrease the total number of etickets;
 handle_call(acquire_ticket, {From, _Ref}, State) ->
@@ -179,15 +180,15 @@ checkout_ticket(From, State = #{name := Pool, checkedout_ticket := Tickets, buck
     monitor(process, From),
     State#{checkedout_ticket => (Tickets + 1), bucket => Dict1}.
 
-adjust_max_tickets({ok, _}, State = #{max_ticket := Max}) ->
-    case Max < ?MAX_TICKET of
+adjust_max_tickets({ok, _}, State = #{max_ticket := Max, configured_max_ticket := PeerMaxTickets}) ->
+    case Max < PeerMaxTickets of
         true ->
             State#{max_ticket => Max + 1};
         _ ->
             State
     end;
-adjust_max_tickets({error, timeout}, State = #{max_ticket := Max, name := Pool, checkedout_ticket := T}) ->
-    NewMax = Max div 2,
+adjust_max_tickets({error, timeout}, State = #{max_ticket := Max, name := Pool, checkedout_ticket := T, timeout_reduce_factor := Timeout_Reduce_Factor}) ->
+    NewMax = Max div Timeout_Reduce_Factor,
     Name = to_name(Pool),
     lager:warning("marina node ~p seens too busy, reduced max tickets to ~p, currently checkedout ~p", [Pool, NewMax, T]),
     case NewMax < 1 of
