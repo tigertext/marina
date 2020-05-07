@@ -10,10 +10,6 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
     code_change/3]).
 
--define(SERVER, ?MODULE).
-
--define(STOP_POLLING_THRESHOLD, 300).
-
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -64,7 +60,7 @@ stop(Pool) ->
     {stop, Reason :: term(), Reply :: term(), NewState :: #{}} |
     {stop, Reason :: term(), NewState :: #{}}).
 
-handle_call(increase_max_ticket, _, State = #{max_ticket := Max, stop_polling_threshold := STOP_POLLING_THRESHOLD}) when Max < STOP_POLLING_THRESHOLD ->
+handle_call(increase_max_ticket, _, State = #{max_ticket := Max, stop_polling_threshold := Stop_Polling_Threshold}) when Max < Stop_Polling_Threshold ->
     schedule_poll(self()),
     {reply, ok, State#{max_ticket => Max + 1}};
 handle_call(increase_max_ticket, _, State) ->
@@ -82,8 +78,7 @@ handle_call({return_ticket, Reason}, {From, _Ref}, State = #{name := Pool, check
     {Dict1, TicketsToReturn} =
         case dict:find(From, Dict) of
             error ->
-                %% some process going to return a ticket but it is not recorded, there must be a leak
-                %% TODO: fix possible leak
+                lager:warning("cannot find process for pool ~p ~p in dict ~p ", [Pool, From, Dict]),
                 {Dict, 0};
             {ok, 1} ->
                 {dict:erase(From, Dict), 1};
