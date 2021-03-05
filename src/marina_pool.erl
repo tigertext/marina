@@ -12,7 +12,8 @@
     node_id/1,
     start/2,
     stop/1,
-    stop_nodes/3
+    stop_nodes/3,
+    start_nodes/4
 ]).
 -export([
     node_up/2,
@@ -64,10 +65,10 @@ node_id(<<A, B, C, D>>) ->
     ok.
 
 start(random, Nodes) ->
-    start_nodes(Nodes, random, 1);
+    start_nodes(true, Nodes, random, 1);
 start(token_aware, Nodes) ->
     marina_ring:build(Nodes),
-    start_nodes(Nodes, token_aware, 1).
+    start_nodes(true, Nodes, token_aware, 1).
 
 -spec stop(non_neg_integer()) ->
     ok.
@@ -120,24 +121,27 @@ check_node({ok, Node}, Strategy, _RoutingKey, N) ->
             %% remove routing key to fallback to random or token_aware without routing key.
             node(Strategy, undefined, N+1);
         false ->
+            shackle_utils:warning_msg(?MODULE, "routing with node ~p", [Node]),
             {ok, Node}
     end.
-
-start_nodes([], random, N) ->
+    
+start_nodes(_rebuild = true, [], random, N) ->
     foil:insert(?MODULE, strategy, {random, N - 1}),
     foil:load(?MODULE);
-start_nodes([], token_aware, N) ->
+start_nodes(_rebuild = true, [], token_aware, N)->
     foil:insert(?MODULE, strategy, {token_aware, N - 1}),
     foil:load(?MODULE);
-start_nodes([{RpcAddress, _Tokens} | T], Strategy, N) ->
+start_nodes(_rebuild = false, [], _, _N)->
+    ok;
+start_nodes(RebuildFoil, [{RpcAddress, _Tokens} | T], Strategy, N) ->
     case start_node(RpcAddress) of
         {ok, NodeId} ->
-            foil:insert(?MODULE, {node, N}, NodeId),
-            start_nodes(T, Strategy, N + 1);
+            RebuildFoil andalso foil:insert(?MODULE, {node, N}, NodeId),
+            start_nodes(RebuildFoil, T, Strategy, N + 1);
         {error, pool_already_started} ->
-            start_nodes(T, Strategy, N + 1);
+            start_nodes(RebuildFoil, T, Strategy, N + 1);
         {error, _Reason} ->
-            start_nodes(T, Strategy, N)
+            start_nodes(RebuildFoil, T, Strategy, N)
     end.
 
 start_node(<<A, B, C, D>> = RpcAddress) ->
@@ -172,7 +176,7 @@ start_node(<<A, B, C, D>> = RpcAddress) ->
         {pool_failure_callback_module, ?MODULE},
         {pool_recover_callback_module, ?MODULE}
     ],
-    
+    ets:delete(?MODULE, NodeId), 
     case shackle_pool:start(NodeId, ?CLIENT, ClientOptions, PoolOptions) of
         ok ->
             {ok, NodeId};
@@ -183,7 +187,6 @@ start_node(<<A, B, C, D>> = RpcAddress) ->
 stop_nodes(NodesToStop, Strategy, NewNodes) ->
     L1 = length(NewNodes),
     L2 = L1 + length(NodesToStop),
-    
     %% update pool dispatch first.
     %% insert updated nodes into foil.
     lists:foldl(fun({RpcAddress, _Token}, N) ->
@@ -191,7 +194,7 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
         foil:insert(?MODULE, {node, N}, NodeId),
         N + 1
                 end, 1, NewNodes),
-    
+    foil:load(?MODULE), 
     %% if strategy is token aware, rebuild the ring.
     (Strategy == token_aware) andalso marina_ring:build(NewNodes),
     
@@ -208,7 +211,7 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
     [
         begin
             NodeId = node_id(RpcAddress),
-            ets:delete(?MODULE, NodeId),
+            ets:insert(?MODULE, {NodeId, true}), %% even the pool is selected, we shouldn't route any traffic to there. 
             shackle_pool:stop(NodeId)
         end || {RpcAddress, _} <- NodesToStop
     ].
@@ -216,3 +219,4 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
     
 is_node_down(NodeName) ->
     ets:lookup(?MODULE, NodeName) /= [].
+
