@@ -124,7 +124,7 @@ check_node({ok, Node}, Strategy, _RoutingKey, N) ->
             %% shackle_utils:warning_msg(?MODULE, "routing with node ~p", [Node]),
             {ok, Node}
     end.
-    
+
 start_nodes(_rebuild = true, [], random, N) ->
     foil:insert(?MODULE, strategy, {random, N - 1}),
     foil:load(?MODULE);
@@ -176,7 +176,7 @@ start_node(<<A, B, C, D>> = RpcAddress) ->
         {pool_failure_callback_module, ?MODULE},
         {pool_recover_callback_module, ?MODULE}
     ],
-    ets:delete(?MODULE, NodeId), 
+    ets:delete(?MODULE, NodeId),
     case shackle_pool:start(NodeId, ?CLIENT, ClientOptions, PoolOptions) of
         ok ->
             {ok, NodeId};
@@ -194,7 +194,7 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
         foil:insert(?MODULE, {node, N}, NodeId),
         N + 1
                 end, 1, NewNodes),
-    foil:load(?MODULE), 
+    foil:load(?MODULE),
     %% if strategy is token aware, rebuild the ring.
     (Strategy == token_aware) andalso marina_ring:build(NewNodes),
 
@@ -211,7 +211,7 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
     [
         begin
             NodeId = node_id(RpcAddress),
-            ets:insert(?MODULE, {NodeId, true}), %% even the pool is selected, we shouldn't route any traffic to there. 
+            ets:insert(?MODULE, {NodeId, true}),
             shackle_pool:stop(NodeId)
         end || {RpcAddress, _} <- NodesToStop
     ].
