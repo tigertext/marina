@@ -121,7 +121,7 @@ check_node({ok, Node}, Strategy, _RoutingKey, N) ->
             %% remove routing key to fallback to random or token_aware without routing key.
             node(Strategy, undefined, N+1);
         false ->
-            shackle_utils:warning_msg(?MODULE, "routing with node ~p", [Node]),
+            %% shackle_utils:warning_msg(?MODULE, "routing with node ~p", [Node]),
             {ok, Node}
     end.
     
@@ -197,15 +197,15 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
     foil:load(?MODULE), 
     %% if strategy is token aware, rebuild the ring.
     (Strategy == token_aware) andalso marina_ring:build(NewNodes),
-    
+
     %% update strategy
     foil:insert(?MODULE, strategy, {Strategy, L1}),
-    
+
     %% delete old nodes from foil.
     [foil:delete(?MODULE, {node, X}) || X<- lists:seq(L1+1, L2)],
     %% reload foil.
     foil:load(?MODULE),
-    
+
     %% delete stopped nodes from node down list
     %% and stop the corresponding pool
     [
@@ -216,7 +216,7 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
         end || {RpcAddress, _} <- NodesToStop
     ].
 
-    
+
 is_node_down(NodeName) ->
     ets:lookup(?MODULE, NodeName) /= [].
 

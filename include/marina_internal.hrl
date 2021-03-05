@@ -18,6 +18,7 @@
 -define(DEFAULT_POOL_SIZE, 16).
 -define(DEFAULT_POOL_STRATEGY, random).
 -define(DEFAULT_PORT, 9042).
+-define(DEFAULT_RACKS, []).
 -define(DEFAULT_RECONNECT, true).
 -define(DEFAULT_RECONNECT_MAX, 120000).
 -define(DEFAULT_RECONNECT_MIN, 1500).
@@ -63,5 +64,5 @@
 -define(ETS_TABLE_CACHE, marina_cache).
 
 %% queries
--define(LOCAL_QUERY, <<"select broadcast_address, data_center, tokens from system.local;">>).
--define(PEERS_QUERY, <<"select rpc_address, data_center, tokens from system.peers;">>).
+-define(LOCAL_QUERY, <<"select broadcast_address, data_center, rack, tokens from system.local;">>).
+-define(PEERS_QUERY, <<"select rpc_address, data_center, rack, tokens from system.peers;">>).
