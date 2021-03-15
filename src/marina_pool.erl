@@ -12,8 +12,7 @@
     node_id/1,
     start/2,
     stop/1,
-    stop_nodes/3,
-    start_nodes/4
+    refresh_nodes/5
 ]).
 -export([
     node_up/2,
@@ -65,10 +64,10 @@ node_id(<<A, B, C, D>>) ->
     ok.
 
 start(random, Nodes) ->
-    start_nodes(true, Nodes, random, 1);
+    start_nodes(Nodes, random, 1);
 start(token_aware, Nodes) ->
     marina_ring:build(Nodes),
-    start_nodes(true, Nodes, token_aware, 1).
+    start_nodes(Nodes, token_aware, 1).
 
 -spec stop(non_neg_integer()) ->
     ok.
@@ -96,7 +95,7 @@ node_up(PoolName, FailedWorkerCount) ->
 node(Strategy, RoutingKey) ->
     node(Strategy, RoutingKey, 1).
 
-node({_, NodeCount} , undefined, N) when N >= NodeCount ->
+node({_, NodeCount}, undefined, N) when N >= NodeCount ->
     %% too many failures, pick first.
     foil:lookup(?MODULE, {node, 1});
 node({random, NodeCount} = Strategy, undefined, N) ->
@@ -112,36 +111,37 @@ check_node({error, _}, Strategy, _RoutingKey, N) ->
     %% cannot find a proper node when routing,
     %% remove the routing key, so the node selection will fall back to
     %% random or roken_aware without routing key.
-    node(Strategy, undefined, N+1);
+    node(Strategy, undefined, N + 1);
 check_node({ok, Node}, Strategy, _RoutingKey, N) ->
     case is_node_down(Node) of
         true ->
             shackle_utils:warning_msg(?MODULE, "get a dead node when finding node, node id ~p, retrying", [Node]),
             %% the selected node is marked as down.
             %% remove routing key to fallback to random or token_aware without routing key.
-            node(Strategy, undefined, N+1);
+            node(Strategy, undefined, N + 1);
         false ->
             %% shackle_utils:warning_msg(?MODULE, "routing with node ~p", [Node]),
             {ok, Node}
     end.
 
-start_nodes(_rebuild = true, [], random, N) ->
+start_nodes([], random, N) ->
     foil:insert(?MODULE, strategy, {random, N - 1}),
     foil:load(?MODULE);
-start_nodes(_rebuild = true, [], token_aware, N)->
+start_nodes([], token_aware, N) ->
     foil:insert(?MODULE, strategy, {token_aware, N - 1}),
     foil:load(?MODULE);
-start_nodes(_rebuild = false, [], _, _N)->
-    ok;
-start_nodes(RebuildFoil, [{RpcAddress, _Tokens} | T], Strategy, N) ->
+start_nodes([{RpcAddress, _Tokens} | T], Strategy, N) ->
     case start_node(RpcAddress) of
         {ok, NodeId} ->
-            RebuildFoil andalso foil:insert(?MODULE, {node, N}, NodeId),
-            start_nodes(RebuildFoil, T, Strategy, N + 1);
+            shackle_utils:warning_msg(?MODULE, "node ~p started ", [RpcAddress]),
+            foil:insert(?MODULE, {node, N}, NodeId),
+            start_nodes(T, Strategy, N + 1);
         {error, pool_already_started} ->
-            start_nodes(RebuildFoil, T, Strategy, N + 1);
+            shackle_utils:warning_msg(?MODULE, "node ~p cannot be started,  pool_already_started", [RpcAddress]),
+            start_nodes(T, Strategy, N + 1);
         {error, _Reason} ->
-            start_nodes(RebuildFoil, T, Strategy, N)
+            shackle_utils:warning_msg(?MODULE, "node ~p cannot be started,  reason ~p", [_Reason]),
+            start_nodes(T, Strategy, N)
     end.
 
 start_node(<<A, B, C, D>> = RpcAddress) ->
@@ -184,30 +184,85 @@ start_node(<<A, B, C, D>> = RpcAddress) ->
             {error, Reason}
     end.
 
-stop_nodes(NodesToStop, Strategy, NewNodes) ->
-    L1 = length(NewNodes),
-    L2 = L1 + length(NodesToStop),
-    %% update pool dispatch first.
-    %% insert updated nodes into foil.
-    lists:foldl(fun({RpcAddress, _Token}, N) ->
-        NodeId = node_id(RpcAddress),
-        foil:insert(?MODULE, {node, N}, NodeId),
-        N + 1
-                end, 1, NewNodes),
-    foil:load(?MODULE),
-    %% if strategy is token aware, rebuild the ring.
+-spec refresh_nodes(list(), list(), random | token_aware, list(), list()) -> ok.
+refresh_nodes([], [], _Strategy, _OldNodes, _NewNodes) ->
+    ok;
+refresh_nodes(NodesToStart, NodesToStop, Strategy, OldNodes, NewNodes) ->
+    rebuild_routing(NodesToStart, NodesToStop, Strategy, length(OldNodes), length(NewNodes)),
     (Strategy == token_aware) andalso marina_ring:build(NewNodes),
-
-    %% update strategy
-    foil:insert(?MODULE, strategy, {Strategy, L1}),
-
-    %% delete old nodes from foil.
-    [foil:delete(?MODULE, {node, X}) || X<- lists:seq(L1+1, L2)],
-    %% reload foil.
+    foil:insert(?MODULE, strategy, {Strategy, length(NewNodes)}),
     foil:load(?MODULE),
+    ok.
 
-    %% delete stopped nodes from node down list
-    %% and stop the corresponding pool
+%% rebuild the routing table
+%% if length(oldnodes) =< length(newnodes) => some node(s) have been added, and/or some node(s) have been switched,
+%%      replace old nodes with new nodes for the xisting routing key
+%%      find the node index which has been removed, set the index (n) to the new node id;
+%% if legnth(oldnodes) > length(new nodes) => some node(s) have been removed, and/or some node(s) hav been switched
+%%      Delete the top M-N routing key, move those nodes to nodes to be started (filter out stopped)
+%%      Find the spared routing slots in 1-n, set the index (n) to the new node id;
+rebuild_routing(NodesToStart, NodesToStop, Strategy, N, M) when N =< M ->
+    NodeIndexRemoved = lookup_nodes(NodesToStop, N),
+    shackle_utils:warning_msg(?MODULE, "N <= M, Nodes to stop ~p NodeIndexRemoved ~p", [NodesToStop, NodeIndexRemoved]),
+    rebuild_routing(NodesToStart, NodeIndexRemoved, Strategy, N + 1),
+    stop_nodes(NodesToStop);
+
+rebuild_routing(NodesToStart, NodesToStop, Strategy, N, M) when N > M ->
+    NodeIndexRemoved = lookup_nodes(NodesToStop, N),
+    shackle_utils:warning_msg(?MODULE, "N > M, Nodes to stop ~p NodeIndexRemoved ~p", [NodesToStop, NodeIndexRemoved]),
+    NodesRemoved =
+        lists:filtermap(fun(X) ->
+            case foil:lookup(?MODULE, {node, X}) of
+                {ok, V} ->
+                    foil:delete(?MODULE, {node, X}),
+                    {true, V};
+                _ ->
+                    false
+            end
+                        end, lists:seq(M + 1, N)),
+    NodesRemovedButNeedStart = NodesRemoved -- NodesToStop,
+    shackle_utils:warning_msg(?MODULE, "N > M, Nodes removed ~p NodesRemovedButNeedStart ~p", [NodesRemoved, NodesRemovedButNeedStart]),
+    rebuild_routing(NodesRemovedButNeedStart ++ NodesToStart, NodeIndexRemoved, Strategy, N + 1),
+    stop_nodes(NodesToStop).
+
+lookup_nodes(Nodes, MaxIndex) ->
+    NodeIds = [node_id(RpcAddress) || {RpcAddress, _} <- Nodes],
+    lists:filtermap(fun(N) ->
+        case foil:lookup(?MODULE, {node, N}) of
+            {ok, V} ->
+                case lists:member(V, NodeIds) of
+                    true ->
+                        {true, N};
+                    _ ->
+                        false
+                end;
+            _ ->
+                false
+        end
+                    end, lists:seq(1, MaxIndex)
+    ).
+
+rebuild_routing([], _, _, _) ->
+    ok;
+
+rebuild_routing([{RpcAddress, _Tokens} | T], [], Strategy, N) ->
+    shackle_utils:warning_msg(?MODULE, "rebuilding routing for ~p use index ~p", [RpcAddress, N]),
+    start_nodes([{RpcAddress, _Tokens}], Strategy, N),
+    rebuild_routing(T, [], Strategy, N + 1);
+rebuild_routing([{RpcAddress, _Tokens} | T], [Index | T1], Strategy, N) ->
+    shackle_utils:warning_msg(?MODULE, "rebuilding routing for ~p use index ~p", [RpcAddress, Index]),
+    start_nodes([{RpcAddress, _Tokens}], Strategy, Index),
+    rebuild_routing(T, T1, Strategy, N);
+rebuild_routing([NodeId | T], [], Strategy, N) ->
+    shackle_utils:warning_msg(?MODULE, "rebuilding routing for ~p use index ~p", [NodeId, N]),
+    foil:insert(?MODULE, {node, N}, NodeId),
+    rebuild_routing(T, [], Strategy, N + 1);
+rebuild_routing([NodeId | T], [Index | T1], Strategy, N) ->
+    shackle_utils:warning_msg(?MODULE, "rebuilding routing for ~p use index ~p", [NodeId, Index]),
+    foil:insert(?MODULE, {node, Index}, NodeId),
+    rebuild_routing(T, T1, Strategy, N).
+
+stop_nodes(NodesToStop) ->
     [
         begin
             NodeId = node_id(RpcAddress),
@@ -215,7 +270,6 @@ stop_nodes(NodesToStop, Strategy, NewNodes) ->
             shackle_pool:stop(NodeId)
         end || {RpcAddress, _} <- NodesToStop
     ].
-
 
 is_node_down(NodeName) ->
     ets:lookup(?MODULE, NodeName) /= [].
